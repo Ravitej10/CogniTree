@@ -1,8 +1,9 @@
 from fastapi import FastAPI
+from pydantic import BaseModel
+from typing import List, Dict
 
 app = FastAPI(title="CogniTree API")
 
-# Temporary mock database of questions with diagnostic metadata
 QUESTIONS_DB = [
     {
         "id": 1,
@@ -33,13 +34,20 @@ QUESTIONS_DB = [
     }
 ]
 
+class AnswerSubmission(BaseModel):
+    question_id: int
+    selected_option: str
+
+class QuizSubmission(BaseModel):
+    student_id: int
+    answers: List[AnswerSubmission]
+
 @app.get("/")
 def home():
     return {"message": "Welcome to CogniTree Backend!"}
 
 @app.get("/quiz")
 def get_quiz():
-    # Return questions to the frontend without exposing the correct answer
     client_questions = []
     for q in QUESTIONS_DB:
         client_questions.append({
@@ -51,3 +59,40 @@ def get_quiz():
             "skill_type": q["skill_type"]
         })
     return {"total": len(client_questions), "questions": client_questions}
+
+@app.post("/quiz/submit")
+def submit_quiz(submission: QuizSubmission):
+    total_questions = len(submission.answers)
+    correct_count = 0
+    detailed_results = []
+    
+    question_map = {q["id"]: q for q in QUESTIONS_DB}
+
+    for item in submission.answers:
+        target_question = question_map.get(item.question_id)
+        if not target_question:
+            continue
+
+        is_correct = (item.selected_option.strip().lower() == target_question["answer"].strip().lower())
+        if is_correct:
+            correct_count += 1
+
+        detailed_results.append({
+            "question_id": item.question_id,
+            "topic": target_question["topic"],
+            "concept": target_question["concept"],
+            "skill_type": target_question["skill_type"],
+            "selected_option": item.selected_option,
+            "correct_answer": target_question["answer"],
+            "is_correct": is_correct
+        })
+
+    score_percentage = round((correct_count / total_questions) * 100, 2) if total_questions > 0 else 0
+
+    return {
+        "student_id": submission.student_id,
+        "total_questions": total_questions,
+        "correct_count": correct_count,
+        "score_percentage": score_percentage,
+        "results": detailed_results
+    }
