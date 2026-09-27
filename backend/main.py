@@ -1,59 +1,12 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Dict
+from sqlalchemy.orm import Session
+
+from backend.database import get_db
+from backend.models import Question, QuizAttempt, StudentAnswerLog
 
 app = FastAPI(title="CogniTree API")
-QUESTIONS_DB = [
-   
-    {
-        "id": 1,
-        "question": "Which data structure follows the First-In, First-Out (FIFO) principle?",
-        "options": ["Stack", "Queue", "Tree", "Graph"],
-        "answer": "Queue",
-        "topic": "Queues",
-        "concept": "FIFO Principle",
-        "skill_type": "Recall"
-    },
-    {
-        "id": 2,
-        "question": "In a Binary Search Tree (BST), where are keys smaller than the root node placed?",
-        "options": ["Right Subtree", "Left Subtree", "At the same level", "Randomly"],
-        "answer": "Left Subtree",
-        "topic": "Trees",
-        "concept": "BST Ordering",
-        "skill_type": "Conceptual"
-    },
-    {
-        "id": 3,
-        "question": "What is the worst-case time complexity to search an element in an unbalanced Binary Search Tree?",
-        "options": ["O(1)", "O(log N)", "O(N)", "O(N log N)"],
-        "answer": "O(N)",
-        "topic": "Trees",
-        "concept": "BST Traversal",
-        "skill_type": "Application"
-    },
-
-    {
-        "id": 4,
-        "question": "In an inorder traversal of a Binary Search Tree, in what order are the keys visited?",
-        "options": ["Descending Order", "Sorted Ascending Order", "Random Order", "Level-by-Level"],
-        "answer": "Sorted Ascending Order",
-        "topic": "Trees",
-        "concept": "BST Traversal",
-        "skill_type": "Conceptual"
-    },
-    {
-        "id": 5,
-        "question": "Which tree traversal algorithm utilizes a Queue for its implementation?",
-        "options": ["Preorder Traversal", "Inorder Traversal", "Postorder Traversal", "Breadth-First / Level Order Traversal"],
-        "answer": "Breadth-First / Level Order Traversal",
-        "topic": "Trees",
-        "concept": "BST Traversal",
-        "skill_type": "Application"
-    }
-]
-
-STUDENT_SESSIONS: Dict[int, Dict] = {}
 
 class AnswerSubmission(BaseModel):
     question_id: int
@@ -68,16 +21,19 @@ def home():
     return {"message": "Welcome to CogniTree Backend!"}
 
 @app.get("/quiz")
-def get_quiz():
+def get_quiz(db: Session = Depends(get_db)):
+    # Retrieve the first 3 baseline diagnostic questions from PostgreSQL
+    db_questions = db.query(Question).limit(3).all()
+    
     client_questions = []
-    for q in QUESTIONS_DB[:3]:
+    for q in db_questions:
         client_questions.append({
-            "id": q["id"],
-            "question": q["question"],
-            "options": q["options"],
-            "topic": q["topic"],
-            "concept": q["concept"],
-            "skill_type": q["skill_type"]
+            "id": q.id,
+            "question": q.question_text,
+            "options": [q.option_a, q.option_b, q.option_c, q.option_d],
+            "topic": q.topic,
+            "concept": q.concept,
+            "skill_type": q.skill_type
         })
     return {"total": len(client_questions), "questions": client_questions}
 
@@ -135,59 +91,104 @@ def compute_diagnostic_matrix(results: List[Dict]):
     }
 
 @app.post("/quiz/submit")
-def submit_quiz(submission: QuizSubmission):
+def submit_quiz(submission: QuizSubmission, db: Session = Depends(get_db)):
     total_questions = len(submission.answers)
     correct_count = 0
     detailed_results = []
-    attempted_question_ids = []
-    question_map = {q["id"]: q for q in QUESTIONS_DB}
+    
+    # Query database for submitted question records
+    submitted_ids = [a.question_id for a in submission.answers]
+    db_questions = db.query(Question).filter(Question.id.in_(submitted_ids)).all()
+    question_map = {q.id: q for q in db_questions}
 
+    # Evaluate responses
+    evaluation_records = []
     for item in submission.answers:
-        attempted_question_ids.append(item.question_id)
-        target_question = question_map.get(item.question_id)
-        if not target_question:
+        target = question_map.get(item.question_id)
+        if not target:
             continue
 
-        is_correct = (item.selected_option.strip().lower() == target_question["answer"].strip().lower())
+        is_correct = (item.selected_option.strip().lower() == target.correct_answer.strip().lower())
         if is_correct:
             correct_count += 1
 
-        detailed_results.append({
-            "question_id": item.question_id,
-            "topic": target_question["topic"],
-            "concept": target_question["concept"],
-            "skill_type": target_question["skill_type"],
+        evaluation_records.append({
+            "question_id": target.id,
+            "topic": target.topic,
+            "concept": target.concept,
+            "skill_type": target.skill_type,
             "selected_option": item.selected_option,
-            "correct_answer": target_question["answer"],
+            "correct_answer": target.correct_answer,
             "is_correct": is_correct
         })
 
     score_percentage = round((correct_count / total_questions) * 100, 2) if total_questions > 0 else 0
-    diagnostics = compute_diagnostic_matrix(detailed_results)
+    diagnostics = compute_diagnostic_matrix(evaluation_records)
 
-    STUDENT_SESSIONS[submission.student_id] = {
-        "attempted_ids": attempted_question_ids,
-        "flagged_weak_concepts": diagnostics["flagged_weak_concepts"]
-    }
+    # Persist the attempt in quiz_attempts table
+    attempt = QuizAttempt(
+        student_id=submission.student_id,
+        total_questions=total_questions,
+        correct_count=correct_count,
+        score_percentage=score_percentage
+    )
+    db.add(attempt)
+    db.commit()
+    db.refresh(attempt)
+
+    # Persist individual answer logs in student_answer_logs table
+    for rec in evaluation_records:
+        log = StudentAnswerLog(
+            attempt_id=attempt.id,
+            student_id=submission.student_id,
+            question_id=rec["question_id"],
+            selected_option=rec["selected_option"],
+            is_correct=rec["is_correct"]
+        )
+        db.add(log)
+    db.commit()
 
     return {
+        "attempt_id": attempt.id,
         "student_id": submission.student_id,
         "total_questions": total_questions,
         "correct_count": correct_count,
         "overall_score": score_percentage,
         "diagnostics": diagnostics,
-        "detailed_results": detailed_results
+        "detailed_results": evaluation_records
     }
 
 @app.get("/remediation/{student_id}")
-def get_remediation_quiz(student_id: int):
-    # Step 5.1: Retrieve student weaknesses
-    session = STUDENT_SESSIONS.get(student_id)
-    if not session:
-        raise HTTPException(status_code=404, detail="No quiz history found for this student ID. Please take the diagnostic quiz first.")
+def get_remediation_quiz(student_id: int, db: Session = Depends(get_db)):
+    # 5.1 & 5.2: Query student's past attempt logs to identify weak concepts and attempted IDs
+    past_logs = (
+        db.query(StudentAnswerLog, Question)
+        .join(Question, StudentAnswerLog.question_id == Question.id)
+        .filter(StudentAnswerLog.student_id == student_id)
+        .all()
+    )
 
-    weak_concepts = session.get("flagged_weak_concepts", [])
-    attempted_ids = set(session.get("attempted_ids", []))
+    if not past_logs:
+        raise HTTPException(
+            status_code=404,
+            detail="No quiz history found for this student. Please take the diagnostic quiz first."
+        )
+
+    attempted_question_ids = {log.question_id for log, _ in past_logs}
+
+    # Recalculate concept scores from historical logs
+    concept_stats = {}
+    for log, q in past_logs:
+        if q.concept not in concept_stats:
+            concept_stats[q.concept] = {"total": 0, "correct": 0}
+        concept_stats[q.concept]["total"] += 1
+        if log.is_correct:
+            concept_stats[q.concept]["correct"] += 1
+
+    weak_concepts = [
+        concept for concept, stats in concept_stats.items()
+        if (stats["correct"] / stats["total"]) * 100 < 70.0
+    ]
 
     if not weak_concepts:
         return {
@@ -196,25 +197,29 @@ def get_remediation_quiz(student_id: int):
             "remediation_questions": []
         }
 
-    targeted_questions = []
-    for q in QUESTIONS_DB:
-        
-        if q["id"] in attempted_ids:
-            continue
-       
-        if q["concept"] in weak_concepts:
-            targeted_questions.append({
-                "id": q["id"],
-                "question": q["question"],
-                "options": q["options"],
-                "topic": q["topic"],
-                "concept": q["concept"],
-                "skill_type": q["skill_type"]
-            })
+    # 5.3: Query database for unattempted questions matching weak concepts
+    remediation_pool = (
+        db.query(Question)
+        .filter(Question.concept.in_(weak_concepts))
+        .filter(Question.id.not_in(attempted_question_ids))
+        .all()
+    )
+
+    remediation_questions = [
+        {
+            "id": q.id,
+            "question": q.question_text,
+            "options": [q.option_a, q.option_b, q.option_c, q.option_d],
+            "topic": q.topic,
+            "concept": q.concept,
+            "skill_type": q.skill_type
+        }
+        for q in remediation_pool
+    ]
 
     return {
         "student_id": student_id,
         "targeted_weak_concepts": weak_concepts,
-        "total_remediation_questions": len(targeted_questions),
-        "remediation_questions": targeted_questions
+        "total_remediation_questions": len(remediation_questions),
+        "remediation_questions": remediation_questions
     }
