@@ -1,8 +1,11 @@
 import { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import TreeMotif from "../components/TreeMotif";
+import { apiRegister } from "../api/client";
 
 export default function SignupPage() {
-  const [form, setForm] = useState({ email: "", password: "", full_name: "" });
+  const navigate = useNavigate();
+  const [form, setForm] = useState({ username: "", email: "", password: "", full_name: "" });
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
@@ -29,23 +32,16 @@ export default function SignupPage() {
     setLoading(true);
 
     try {
-      // Simulate network request delay since backend is not connected yet
-      await new Promise((resolve) => setTimeout(resolve, 600));
+      const username = form.username.trim() || form.email.split("@")[0].replace(/[^a-zA-Z0-9_]/g, "");
+      await apiRegister({
+        username: username,
+        email: form.email.trim().toLowerCase(),
+        password: form.password,
+      });
 
-      // Store a mock session token and user info locally
-      localStorage.setItem("access_token", "mock-demo-token-cognitree");
-      localStorage.setItem(
-        "mock_user",
-        JSON.stringify({
-          email: form.email.trim().toLowerCase(),
-          full_name: form.full_name.trim() || "Student",
-        })
-      );
-
-      // Redirect to dashboard or home (adjust path as needed)
-      window.location.href = "/dashboard";
+      navigate("/dashboard");
     } catch (err) {
-      setError("Something went wrong. Please try again.");
+      setError(err.message || "Failed to create account. Please check your credentials.");
     } finally {
       setLoading(false);
     }
@@ -113,6 +109,24 @@ export default function SignupPage() {
                 onChange={updateField}
                 autoComplete="name"
                 placeholder="Alex Morgan"
+                disabled={loading}
+                className="ct-input rounded-xl border bg-white px-4 py-2.5 text-sm"
+                style={{ borderColor: "#D8DED4", color: "#14231C" }}
+              />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="signup-username" className="text-sm font-medium text-[#14231C]">
+                Username
+              </label>
+              <input
+                id="signup-username"
+                name="username"
+                required
+                value={form.username}
+                onChange={updateField}
+                autoComplete="username"
+                placeholder="alexmorgan"
                 disabled={loading}
                 className="ct-input rounded-xl border bg-white px-4 py-2.5 text-sm"
                 style={{ borderColor: "#D8DED4", color: "#14231C" }}

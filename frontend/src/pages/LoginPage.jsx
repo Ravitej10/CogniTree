@@ -1,7 +1,10 @@
 import { useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import TreeMotif from "../components/TreeMotif";
+import { apiLogin } from "../api/client";
 
 export default function LoginPage() {
+  const navigate = useNavigate();
   const [form, setForm] = useState({ email: "", password: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -16,18 +19,14 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      await new Promise((resolve) => setTimeout(resolve, 600));
+      await apiLogin({
+        username: form.email.trim(),
+        password: form.password,
+      });
 
-      const stored = localStorage.getItem("mock_user");
-      if (!stored) {
-        setError("No account found. Try signing up first.");
-        return;
-      }
-
-      localStorage.setItem("access_token", "mock-demo-token-cognitree");
-      window.location.href = "/dashboard";
+      navigate("/dashboard");
     } catch (err) {
-      setError("Something went wrong. Please try again.");
+      setError(err.message || "Incorrect username/email or password.");
     } finally {
       setLoading(false);
     }
@@ -84,17 +83,17 @@ export default function LoginPage() {
           <form onSubmit={handleSubmit} className="font-body mt-8 flex flex-col gap-4">
             <div className="flex flex-col gap-1.5">
               <label htmlFor="login-email" className="text-sm font-medium text-[#14231C]">
-                Email address
+                Username or Email address
               </label>
               <input
                 id="login-email"
                 name="email"
-                type="email"
+                type="text"
                 required
-                autoComplete="email"
+                autoComplete="username"
                 value={form.email}
                 onChange={updateField}
-                placeholder="you@school.edu"
+                placeholder="you@school.edu or username"
                 disabled={loading}
                 className="ct-input rounded-xl border bg-white px-4 py-2.5 text-sm"
                 style={{ borderColor: "#D8DED4", color: "#14231C" }}
