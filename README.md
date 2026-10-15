@@ -15,3 +15,33 @@ Instead of generic scores, the system evaluates student responses across a multi
 - **Backend:** Python, FastAPI, PostgreSQL
 - **Frontend:** Next.js, React, Tailwind CSS
 - **AI & Processing:** Google Gemini API, LangChain, ChromaDB, SentenceTransformers
+
+## AI/RAG setup
+
+Install the main environment and the AI-specific dependencies:
+
+```bash
+pip install -r requirements.txt
+pip install -r requirements-ai.txt
+```
+
+Copy `backend/env.example` to `.env` (or export the variables in your shell),
+then set `GOOGLE_API_KEY` to enable Gemini. Without a key, document ingestion,
+retrieval, and a deterministic grounded question fallback continue to work.
+
+The integrated pipeline is:
+
+1. `backend/services/ingestion_service.py` extracts and chunks PDF/text files.
+2. `backend/services/vector_store.py` indexes user-scoped chunks in ChromaDB
+   and maintains a SQLite keyword-search fallback.
+3. `backend/services/question_factory.py` retrieves document context and creates
+   schema-validated questions with Gemini or the grounded fallback.
+4. `backend/services/diagnostic_service.py` and `adaptive_service.py` identify
+   weak topic/skill cells and select targeted remediation questions.
+
+Useful authenticated endpoints include:
+
+- `GET /rag/search?query=...`
+- `POST /documents/{document_id}/generate-questions`
+- `GET /diagnostics/matrix`
+- `GET /diagnostics/adaptive-questions`

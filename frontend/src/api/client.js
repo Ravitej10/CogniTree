@@ -111,6 +111,22 @@ export async function apiGetMyDocuments() {
   return request("/documents/my-documents");
 }
 
+export async function apiSearchMaterials(query, { documentId, limit = 5 } = {}) {
+  const params = new URLSearchParams({ query, limit: String(limit) });
+  if (documentId != null) params.set("document_id", String(documentId));
+  return request(`/rag/search?${params.toString()}`);
+}
+
+export async function apiGenerateDocumentQuestions(
+  documentId,
+  { count = 5, topic = null, subtopic = null } = {},
+) {
+  return request(`/documents/${documentId}/generate-questions`, {
+    method: "POST",
+    body: JSON.stringify({ count, topic, subtopic }),
+  });
+}
+
 // --- Quiz Endpoints ---
 export async function apiGetQuiz() {
   return request("/quiz");
@@ -129,4 +145,12 @@ export async function apiGetQuizHistory() {
 
 export async function apiGetStudentMastery() {
   return request("/quiz/mastery");
+}
+
+export async function apiGetDiagnosticMatrix() {
+  return request("/diagnostics/matrix");
+}
+
+export async function apiGetAdaptiveQuestions(count = 10) {
+  return request(`/diagnostics/adaptive-questions?count=${count}`);
 }

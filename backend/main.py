@@ -9,7 +9,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
@@ -21,6 +21,7 @@ from backend.auth import (
     verify_password,
 )
 from backend.database import get_db
+from backend.ai_schemas import GenerateQuestionsRequest
 from backend.models import (
     ConceptTag,
     DocumentStatus,
@@ -160,9 +161,10 @@ async def upload_document(
     db: Session = Depends(get_db),
 ):
     # 1. Create a tracking record in Supabase
+    safe_filename = Path(file.filename or "upload.pdf").name
     doc_record = SourceDocument(
         user_id=current_user.id,
-        filename=file.filename,
+        filename=safe_filename,
         status=DocumentStatus.PENDING,
         chunk_count=0,
     )
@@ -171,27 +173,34 @@ async def upload_document(
     db.refresh(doc_record)
 
     # 2. Save physical file locally
-    saved_path = UPLOAD_DIR / f"{doc_record.id}_{file.filename}"
+    saved_path = UPLOAD_DIR / f"{doc_record.id}_{safe_filename}"
     with open(saved_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # 3. Run the ingestion pipeline
-    import ingest
-    result = ingest.ingest_document(
-        document_id=str(doc_record.id),
-        file_path=str(saved_path)
-    )
+    # 3. Extract, chunk, embed, and index the document for this user.
+    from backend.services.ingestion_service import IngestionError, ingest_document
 
-    if result.status == "ready":
+    doc_record.status = DocumentStatus.PROCESSING
+    db.commit()
+    try:
+        stored_count = ingest_document(
+            user_id=current_user.id,
+            document_id=doc_record.id,
+            file_path=str(saved_path),
+        )
         doc_record.status = DocumentStatus.READY
-        doc_record.chunk_count = result.chunk_count
-    else:
+        doc_record.chunk_count = stored_count
+    except IngestionError as exc:
         doc_record.status = DocumentStatus.FAILED
         db.commit()
         raise HTTPException(
-            status_code=500,
-            detail=f"Ingestion failed: {result.error}"
-        )
+            status_code=422,
+            detail=f"Ingestion failed: {exc}",
+        ) from exc
+    except Exception as exc:
+        doc_record.status = DocumentStatus.FAILED
+        db.commit()
+        raise HTTPException(status_code=500, detail="Document indexing failed.") from exc
 
     db.commit()
     db.refresh(doc_record)
@@ -202,6 +211,98 @@ async def upload_document(
         "filename": doc_record.filename,
         "chunk_count": doc_record.chunk_count,
         "status": doc_record.status.value,
+    }
+
+
+def _question_payload(question: Question) -> dict:
+    return {
+        "id": question.id,
+        "question": question.question_text,
+        "question_text": question.question_text,
+        "options": question.options,
+        "answer_index": question.answer_index,
+        "explanation": question.explanation,
+        "topic": question.topic,
+        "subtopic": question.subtopic,
+        "skill_type": (
+            question.skill_type.value
+            if hasattr(question.skill_type, "value")
+            else str(question.skill_type)
+        ),
+    }
+
+
+@app.get("/rag/search")
+def search_my_materials(
+    query: str = Query(min_length=1),
+    document_id: Optional[int] = None,
+    limit: int = Query(default=5, ge=1, le=20),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Semantically retrieve chunks from the current user's indexed material."""
+    if document_id is not None:
+        owned = (
+            db.query(SourceDocument)
+            .filter(
+                SourceDocument.id == document_id,
+                SourceDocument.user_id == current_user.id,
+            )
+            .first()
+        )
+        if owned is None:
+            raise HTTPException(status_code=404, detail="Document not found.")
+
+    from backend.services.vector_store import query_by_topic
+
+    return {
+        "query": query,
+        "results": query_by_topic(
+            user_id=current_user.id,
+            topic_keywords=query,
+            n_results=limit,
+            document_id=document_id,
+        ),
+    }
+
+
+@app.post("/documents/{document_id}/generate-questions")
+def generate_document_questions(
+    document_id: int,
+    request: GenerateQuestionsRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Generate and persist validated questions grounded in one owned document."""
+    document = (
+        db.query(SourceDocument)
+        .filter(
+            SourceDocument.id == document_id,
+            SourceDocument.user_id == current_user.id,
+        )
+        .first()
+    )
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    if document.status != DocumentStatus.READY:
+        raise HTTPException(status_code=409, detail="Document indexing is not complete.")
+
+    from backend.services.question_factory import generate_from_document
+
+    questions = generate_from_document(
+        db=db,
+        user_id=current_user.id,
+        document_id=document_id,
+        count=request.count,
+        topic=request.topic,
+        subtopic=request.subtopic,
+    )
+    if not questions:
+        raise HTTPException(status_code=422, detail="No grounded questions could be generated.")
+    return {
+        "document_id": document_id,
+        "generated": len(questions),
+        "questions": [_question_payload(question) for question in questions],
     }
 
 @app.get("/documents/my-documents")
@@ -393,4 +494,45 @@ def get_student_mastery(
         "gaps_count": gaps_count,
         "strong_count": strong_count,
         "average_mastery": avg_mastery,
+    }
+
+
+@app.get("/diagnostics/matrix")
+def get_diagnostic_matrix(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from backend.services.diagnostic_service import MASTERY_THRESHOLD, compute_matrix
+
+    return {
+        "user_id": current_user.id,
+        "threshold": MASTERY_THRESHOLD,
+        "cells": [cell.model_dump() for cell in compute_matrix(db, current_user.id)],
+    }
+
+
+@app.get("/diagnostics/adaptive-questions")
+def get_adaptive_questions(
+    count: int = Query(default=10, ge=1, le=20),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from backend.services.adaptive_service import build_remediation_quiz
+    from backend.services.diagnostic_service import get_gap_cells
+
+    gaps = get_gap_cells(db, current_user.id)
+    if not gaps:
+        raise HTTPException(
+            status_code=422,
+            detail="No diagnosed gaps yet; complete a quiz first.",
+        )
+    questions = build_remediation_quiz(db, current_user.id, gaps, count)
+    if not questions:
+        raise HTTPException(
+            status_code=422,
+            detail="No questions are available for the diagnosed gaps.",
+        )
+    return {
+        "targeted_gaps": [cell.model_dump() for cell in gaps],
+        "questions": [_question_payload(question) for question in questions],
     }
