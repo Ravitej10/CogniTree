@@ -13,12 +13,20 @@ class GeneratedQuestion(BaseModel):
     topic: str = Field(min_length=1)
     subtopic: str = Field(min_length=1)
     skill_type: Literal["memorization", "application"]
+    difficulty: Literal["easy", "medium", "hard"]
+    source_page: int | None = Field(default=None, ge=1)
 
 
 class GenerateQuestionsRequest(BaseModel):
-    count: int = Field(default=5, ge=1, le=20)
+    count: int = Field(default=5, ge=5, le=10)
     topic: str | None = None
     subtopic: str | None = None
+    model: Literal[
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-pro-preview",
+    ] = "gemini-3.8-flash"
 
 
 class RetrievalHit(BaseModel):
@@ -26,6 +34,7 @@ class RetrievalHit(BaseModel):
     document_id: int
     chunk_index: int
     distance: float | None = None
+    source_page: int | None = Field(default=None, ge=1)
 
 
 class MatrixCell(BaseModel):

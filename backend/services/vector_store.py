@@ -25,10 +25,14 @@ def _connect() -> sqlite3.Connection:
             user_id INTEGER NOT NULL,
             document_id INTEGER NOT NULL,
             chunk_index INTEGER NOT NULL,
-            content TEXT NOT NULL
+            content TEXT NOT NULL,
+            source_page INTEGER
         )
         """
     )
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(chunks)")}
+    if "source_page" not in columns:
+        connection.execute("ALTER TABLE chunks ADD COLUMN source_page INTEGER")
     connection.commit()
     return connection
 
@@ -50,15 +54,27 @@ except Exception as exc:
     print(f"[VectorStore] Semantic index unavailable; using keyword fallback: {exc}")
 
 
-def add_chunks(user_id: int, document_id: int, chunks: list[str]) -> int:
+def add_chunks(user_id: int, document_id: int, chunks: list[str | dict]) -> int:
     """Replace and index all chunks belonging to one user's document."""
     if not chunks:
         return 0
 
-    ids = [f"user{user_id}-doc{document_id}-chunk{i}" for i in range(len(chunks))]
+    normalized = [
+        {
+            "text": chunk if isinstance(chunk, str) else chunk["text"],
+            "source_page": None if isinstance(chunk, str) else chunk.get("source_page"),
+        }
+        for chunk in chunks
+    ]
+    ids = [f"user{user_id}-doc{document_id}-chunk{i}" for i in range(len(normalized))]
     metadatas = [
-        {"user_id": user_id, "document_id": document_id, "chunk_index": i}
-        for i in range(len(chunks))
+        {
+            "user_id": user_id,
+            "document_id": document_id,
+            "chunk_index": i,
+            **({"source_page": chunk["source_page"]} if chunk["source_page"] else {}),
+        }
+        for i, chunk in enumerate(normalized)
     ]
 
     with _connect() as connection:
@@ -67,11 +83,11 @@ def add_chunks(user_id: int, document_id: int, chunks: list[str]) -> int:
             (user_id, document_id),
         )
         connection.executemany(
-            "INSERT INTO chunks (id, user_id, document_id, chunk_index, content) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO chunks (id, user_id, document_id, chunk_index, content, source_page) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             [
-                (ids[i], user_id, document_id, i, chunk)
-                for i, chunk in enumerate(chunks)
+                (ids[i], user_id, document_id, i, chunk["text"], chunk["source_page"])
+                for i, chunk in enumerate(normalized)
             ],
         )
 
@@ -86,7 +102,11 @@ def add_chunks(user_id: int, document_id: int, chunks: list[str]) -> int:
             existing = _chroma_collection.get(where=scope)
             if existing.get("ids"):
                 _chroma_collection.delete(ids=existing["ids"])
-            _chroma_collection.add(ids=ids, documents=chunks, metadatas=metadatas)
+            _chroma_collection.add(
+                ids=ids,
+                documents=[chunk["text"] for chunk in normalized],
+                metadatas=metadatas,
+            )
         except Exception as exc:
             print(f"[VectorStore] Chroma write warning: {exc}")
 
@@ -129,13 +149,14 @@ def query_by_topic(
                         "document_id": int(meta["document_id"]),
                         "chunk_index": int(meta["chunk_index"]),
                         "distance": float(distance),
+                        "source_page": meta.get("source_page"),
                     }
                     for text, meta, distance in zip(documents, metadatas, distances)
                 ]
         except Exception as exc:
             print(f"[VectorStore] Chroma query warning: {exc}")
 
-    sql = "SELECT document_id, chunk_index, content FROM chunks WHERE user_id = ?"
+    sql = "SELECT document_id, chunk_index, content, source_page FROM chunks WHERE user_id = ?"
     params: list[int] = [user_id]
     if document_id is not None:
         sql += " AND document_id = ?"
@@ -145,14 +166,14 @@ def query_by_topic(
 
     query_tokens = set(re.findall(r"\w+", topic_keywords.lower()))
     ranked = []
-    for row_document_id, chunk_index, content in rows:
+    for row_document_id, chunk_index, content, source_page in rows:
         lowered = content.lower()
         score = sum(
             1.0 + math.log(lowered.count(token))
             for token in query_tokens
             if lowered.count(token)
         )
-        ranked.append((score, row_document_id, chunk_index, content))
+        ranked.append((score, row_document_id, chunk_index, content, source_page))
     ranked.sort(key=lambda item: item[0], reverse=True)
     return [
         {
@@ -160,17 +181,21 @@ def query_by_topic(
             "document_id": row_document_id,
             "chunk_index": chunk_index,
             "distance": None,
+            "source_page": source_page,
         }
-        for _, row_document_id, chunk_index, content in ranked[:limit]
+        for _, row_document_id, chunk_index, content, source_page in ranked[:limit]
     ]
 
 
-def get_document_chunks(user_id: int, document_id: int) -> list[str]:
+def get_document_chunks(user_id: int, document_id: int) -> list[dict]:
     with _connect() as connection:
         rows = connection.execute(
-            "SELECT content FROM chunks WHERE user_id = ? AND document_id = ? "
+            "SELECT content, chunk_index, source_page FROM chunks "
+            "WHERE user_id = ? AND document_id = ? "
             "ORDER BY chunk_index",
             (user_id, document_id),
         ).fetchall()
-    return [row[0] for row in rows]
-
+    return [
+        {"text": content, "chunk_index": chunk_index, "source_page": source_page}
+        for content, chunk_index, source_page in rows
+    ]

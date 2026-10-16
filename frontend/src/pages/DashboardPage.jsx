@@ -108,7 +108,7 @@ export default function DashboardPage() {
       const res = await apiUploadDocument(selectedFile);
       setUploadMsg({
         type: "success",
-        text: `"${res.filename}" processed successfully (${res.chunk_count} chunks indexed in ChromaDB)!`,
+        text: `"${res.filename}" is ready with ${res.question_count || 0} generated questions. Select its card to take the diagnostic test.`,
       });
       setSelectedFile(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -276,9 +276,10 @@ export default function DashboardPage() {
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
                 {documents.map((doc) => (
-                  <div
+                  <Link
                     key={doc.id}
-                    className="flex flex-col justify-between rounded-xl border p-3.5"
+                    to={`/documents/${doc.id}`}
+                    className="flex flex-col justify-between rounded-xl border p-3.5 transition hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-[#2F6B4F]"
                     style={{ borderColor: "#E8ECE5", background: "#F7F8F4" }}
                   >
                     <div className="flex items-start gap-2">
@@ -292,6 +293,9 @@ export default function DashboardPage() {
                         <p className="text-[11px] font-mono text-[#8B9A8C] mt-0.5">
                           {doc.chunk_count} vector chunks
                         </p>
+                        <p className="text-[11px] font-mono text-[#2F6B4F] mt-1">
+                          {doc.question_count || 0} AI questions · Open diagnostic →
+                        </p>
                       </div>
                     </div>
                     <div className="mt-2.5 flex items-center justify-between text-[11px]">
@@ -300,7 +304,7 @@ export default function DashboardPage() {
                         {doc.status}
                       </span>
                     </div>
-                  </div>
+                  </Link>
                 ))}
               </div>
             )}

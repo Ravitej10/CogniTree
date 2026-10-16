@@ -111,6 +111,14 @@ export async function apiGetMyDocuments() {
   return request("/documents/my-documents");
 }
 
+export async function apiGetDocument(documentId) {
+  return request(`/documents/detail/${documentId}`);
+}
+
+export async function apiGetDocumentQuestions(documentId) {
+  return request(`/documents/${documentId}/questions`);
+}
+
 export async function apiSearchMaterials(query, { documentId, limit = 5 } = {}) {
   const params = new URLSearchParams({ query, limit: String(limit) });
   if (documentId != null) params.set("document_id", String(documentId));
@@ -119,11 +127,18 @@ export async function apiSearchMaterials(query, { documentId, limit = 5 } = {}) 
 
 export async function apiGenerateDocumentQuestions(
   documentId,
-  { count = 5, topic = null, subtopic = null } = {},
+  { count = 5, topic = null, subtopic = null, model = "gemini-3.8-flash" } = {},
 ) {
   return request(`/documents/${documentId}/generate-questions`, {
     method: "POST",
-    body: JSON.stringify({ count, topic, subtopic }),
+    body: JSON.stringify({ count, topic, subtopic, model }),
+  });
+}
+
+export async function apiSubmitDocumentQuiz(documentId, answers) {
+  return request(`/documents/${documentId}/quiz/submit`, {
+    method: "POST",
+    body: JSON.stringify({ answers }),
   });
 }
 

@@ -4,6 +4,7 @@ import LoginPage from "./pages/LoginPage";
 import SignupPage from "./pages/SignupPage";
 import DashboardPage from "./pages/DashboardPage";
 import TreePage from "./pages/TreePage";
+import DocumentQuizPage from "./pages/DocumentQuizPage";
 import NotFoundPage from "./pages/NotFoundPage";
 
 export default function App() {
@@ -13,6 +14,7 @@ export default function App() {
       <Route path="/login" element={<LoginPage />} />
       <Route path="/signup" element={<SignupPage />} />
       <Route path="/dashboard" element={<DashboardPage />} />
+      <Route path="/documents/:documentId" element={<DocumentQuizPage />} />
       <Route path="/tree" element={<TreePage />} />
       <Route path="*" element={<NotFoundPage />} />
     </Routes>

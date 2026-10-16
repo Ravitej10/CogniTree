@@ -26,8 +26,8 @@ pip install -r requirements-ai.txt
 ```
 
 Copy `backend/env.example` to `.env` (or export the variables in your shell),
-then set `GOOGLE_API_KEY` to enable Gemini. Without a key, document ingestion,
-retrieval, and a deterministic grounded question fallback continue to work.
+then set `GOOGLE_API_KEY` to enable Gemini. Without a working key, document
+ingestion and retrieval still work, but question generation returns a clear error.
 
 The integrated pipeline is:
 
@@ -35,7 +35,7 @@ The integrated pipeline is:
 2. `backend/services/vector_store.py` indexes user-scoped chunks in ChromaDB
    and maintains a SQLite keyword-search fallback.
 3. `backend/services/question_factory.py` retrieves document context and creates
-   schema-validated questions with Gemini or the grounded fallback.
+   schema-validated questions with Gemini. Invalid or failed generations are not stored.
 4. `backend/services/diagnostic_service.py` and `adaptive_service.py` identify
    weak topic/skill cells and select targeted remediation questions.
 

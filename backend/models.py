@@ -44,6 +44,76 @@ class SourceDocument(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="documents")
+    generated_questions = relationship(
+        "DocumentQuestion", back_populates="source_document", cascade="all, delete-orphan"
+    )
+    quiz_sessions = relationship(
+        "DocumentQuizSession", back_populates="source_document", cascade="all, delete-orphan"
+    )
+
+
+class DocumentQuestion(Base):
+    """AI-generated question owned by one user and grounded in one document."""
+
+    __tablename__ = "document_questions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    source_document_id = Column(
+        Integer, ForeignKey("source_documents.id"), nullable=False, index=True
+    )
+    question_text = Column(Text, nullable=False)
+    options = Column(JSON, nullable=False)
+    answer_index = Column(Integer, nullable=False)
+    explanation = Column(Text, nullable=False)
+    topic = Column(String, nullable=False)
+    subtopic = Column(String, nullable=False)
+    skill_type = Column(String, nullable=False)
+    difficulty = Column(String, nullable=False, default="medium")
+    source_page = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    source_document = relationship("SourceDocument", back_populates="generated_questions")
+    responses = relationship(
+        "DocumentQuizResponse", back_populates="question", cascade="all, delete-orphan"
+    )
+
+
+class DocumentQuizSession(Base):
+    """One user's diagnostic attempt for one uploaded document."""
+
+    __tablename__ = "document_quiz_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    source_document_id = Column(
+        Integer, ForeignKey("source_documents.id"), nullable=False, index=True
+    )
+    score = Column(Float, default=0.0, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    source_document = relationship("SourceDocument", back_populates="quiz_sessions")
+    responses = relationship(
+        "DocumentQuizResponse", back_populates="session", cascade="all, delete-orphan"
+    )
+
+
+class DocumentQuizResponse(Base):
+    __tablename__ = "document_quiz_responses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(
+        Integer, ForeignKey("document_quiz_sessions.id"), nullable=False, index=True
+    )
+    question_id = Column(
+        Integer, ForeignKey("document_questions.id"), nullable=False, index=True
+    )
+    selected_index = Column(Integer, nullable=False)
+    is_correct = Column(Boolean, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    session = relationship("DocumentQuizSession", back_populates="responses")
+    question = relationship("DocumentQuestion", back_populates="responses")
 
 
 class ConceptTag(Base):

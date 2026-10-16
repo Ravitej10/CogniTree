@@ -12,6 +12,7 @@ if str(BASE_DIR) not in sys.path:
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from backend.auth import (
@@ -20,10 +21,13 @@ from backend.auth import (
     hash_password,
     verify_password,
 )
-from backend.database import get_db
+from backend.database import Base, engine, get_db
 from backend.ai_schemas import GenerateQuestionsRequest
 from backend.models import (
     ConceptTag,
+    DocumentQuestion,
+    DocumentQuizResponse,
+    DocumentQuizSession,
     DocumentStatus,
     Question,
     QuizSession,
@@ -35,6 +39,12 @@ from backend.models import (
 
 
 app = FastAPI(title="CogniTree API")
+
+
+@app.on_event("startup")
+def create_missing_tables():
+    """Create the document-assessment tables on existing development databases."""
+    Base.metadata.create_all(bind=engine)
 
 # Allow requests from Vite dev server and local clients
 app.add_middleware(
@@ -210,7 +220,9 @@ async def upload_document(
         "document_id": doc_record.id,
         "filename": doc_record.filename,
         "chunk_count": doc_record.chunk_count,
+        "question_count": 0,
         "status": doc_record.status.value,
+        "question_generation_error": None,
     }
 
 
@@ -229,6 +241,8 @@ def _question_payload(question: Question) -> dict:
             if hasattr(question.skill_type, "value")
             else str(question.skill_type)
         ),
+        "difficulty": getattr(question, "difficulty", "medium"),
+        "source_page": getattr(question, "source_page", None),
     }
 
 
@@ -287,22 +301,207 @@ def generate_document_questions(
     if document.status != DocumentStatus.READY:
         raise HTTPException(status_code=409, detail="Document indexing is not complete.")
 
-    from backend.services.question_factory import generate_from_document
-
-    questions = generate_from_document(
-        db=db,
-        user_id=current_user.id,
-        document_id=document_id,
-        count=request.count,
-        topic=request.topic,
-        subtopic=request.subtopic,
+    from backend.services.question_factory import (
+        GeminiBusyError,
+        GeminiUnavailableError,
+        generate_from_document,
     )
+
+    existing_count = (
+        db.query(DocumentQuestion)
+        .filter(
+            DocumentQuestion.source_document_id == document_id,
+            DocumentQuestion.user_id == current_user.id,
+        )
+        .count()
+    )
+
+    try:
+        questions = generate_from_document(
+            db=db,
+            user_id=current_user.id,
+            document_id=document_id,
+            count=request.count,
+            topic=request.topic,
+            subtopic=request.subtopic,
+            model_name=request.model,
+        )
+    except (GeminiUnavailableError, GeminiBusyError) as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not questions:
         raise HTTPException(status_code=422, detail="No grounded questions could be generated.")
     return {
         "document_id": document_id,
         "generated": len(questions),
+        "question_count": existing_count + len(questions),
         "questions": [_question_payload(question) for question in questions],
+    }
+
+
+@app.get("/documents/detail/{document_id}")
+def get_document_workspace(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    document = (
+        db.query(SourceDocument)
+        .filter(
+            SourceDocument.id == document_id,
+            SourceDocument.user_id == current_user.id,
+        )
+        .first()
+    )
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    question_count = (
+        db.query(DocumentQuestion)
+        .filter(
+            DocumentQuestion.source_document_id == document_id,
+            DocumentQuestion.user_id == current_user.id,
+        )
+        .count()
+    )
+    attempt_count = (
+        db.query(DocumentQuizSession)
+        .filter(
+            DocumentQuizSession.source_document_id == document_id,
+            DocumentQuizSession.user_id == current_user.id,
+        )
+        .count()
+    )
+    return {
+        "id": document.id,
+        "filename": document.filename,
+        "status": document.status.value,
+        "chunk_count": document.chunk_count,
+        "question_count": question_count,
+        "attempt_count": attempt_count,
+        "created_at": document.created_at,
+    }
+
+
+@app.get("/documents/{document_id}/questions")
+def get_document_questions(
+    document_id: int,
+    quiz_size: int = Query(default=10, ge=7, le=10),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    owned_document = (
+        db.query(SourceDocument.id)
+        .filter(
+            SourceDocument.id == document_id,
+            SourceDocument.user_id == current_user.id,
+        )
+        .first()
+    )
+    if owned_document is None:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    questions = (
+        db.query(DocumentQuestion)
+        .filter(
+            DocumentQuestion.source_document_id == document_id,
+            DocumentQuestion.user_id == current_user.id,
+        )
+        .order_by(func.random())
+        .limit(quiz_size)
+        .all()
+    )
+    return {
+        "document_id": document_id,
+        "total": len(questions),
+        "questions": [
+            {
+                "id": question.id,
+                "question": question.question_text,
+                "options": question.options,
+                "topic": question.topic,
+                "subtopic": question.subtopic,
+                "skill_type": question.skill_type,
+                "difficulty": question.difficulty,
+                "source_page": question.source_page,
+            }
+            for question in questions
+        ],
+    }
+
+
+@app.post("/documents/{document_id}/quiz/submit")
+def submit_document_quiz(
+    document_id: int,
+    submission: QuizSubmission,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not submission.answers:
+        raise HTTPException(status_code=400, detail="No answers submitted.")
+    question_ids = [answer.question_id for answer in submission.answers]
+    questions = (
+        db.query(DocumentQuestion)
+        .filter(
+            DocumentQuestion.id.in_(question_ids),
+            DocumentQuestion.source_document_id == document_id,
+            DocumentQuestion.user_id == current_user.id,
+        )
+        .all()
+    )
+    question_map = {question.id: question for question in questions}
+    if len(question_map) != len(set(question_ids)):
+        raise HTTPException(
+            status_code=400,
+            detail="One or more questions do not belong to this document.",
+        )
+
+    session = DocumentQuizSession(
+        user_id=current_user.id,
+        source_document_id=document_id,
+        score=0.0,
+    )
+    db.add(session)
+    db.flush()
+
+    correct_count = 0
+    results = []
+    for answer in submission.answers:
+        question = question_map[answer.question_id]
+        is_correct = answer.selected_index == question.answer_index
+        correct_count += int(is_correct)
+        db.add(
+            DocumentQuizResponse(
+                session_id=session.id,
+                question_id=question.id,
+                selected_index=answer.selected_index,
+                is_correct=is_correct,
+            )
+        )
+        results.append(
+            {
+                "question_id": question.id,
+                "question": question.question_text,
+                "selected_index": answer.selected_index,
+                "correct_index": question.answer_index,
+                "is_correct": is_correct,
+                "explanation": question.explanation,
+                "topic": question.topic,
+                "subtopic": question.subtopic,
+                "skill_type": question.skill_type,
+                "difficulty": question.difficulty,
+                "source_page": question.source_page,
+            }
+        )
+
+    score = round(correct_count / len(submission.answers) * 100, 2)
+    session.score = score
+    db.commit()
+    return {
+        "session_id": session.id,
+        "document_id": document_id,
+        "score_percentage": score,
+        "total_questions": len(submission.answers),
+        "correct_count": correct_count,
+        "results": results,
     }
 
 @app.get("/documents/my-documents")
@@ -322,6 +521,14 @@ def list_my_documents(
             "chunk_count": doc.chunk_count,
             "status": doc.status.value,
             "created_at": doc.created_at,
+            "question_count": (
+                db.query(DocumentQuestion)
+                .filter(
+                    DocumentQuestion.source_document_id == doc.id,
+                    DocumentQuestion.user_id == current_user.id,
+                )
+                .count()
+            ),
         }
         for doc in docs
     ]
